@@ -1,0 +1,134 @@
+name: Automated Database Backup
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 1 * * *"
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backup_demo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d backup_demo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Create test data
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql \
+            -h localhost \
+            -U postgres \
+            -d backup_demo \
+            -c "DROP TABLE IF EXISTS users; CREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100), email VARCHAR(150));"
+
+          psql \
+            -h localhost \
+            -U postgres \
+            -d backup_demo \
+            -c "INSERT INTO users (name, email) VALUES ('John Doe', 'john@example.com'), ('Mary James', 'mary@example.com'), ('David Okoro', 'david@example.com');"
+
+      - name: Create backup
+        env:
+          PGPASSWORD: postgres
+        run: |
+          mkdir -p backups
+          pg_dump \
+            -h localhost \
+            -U postgres \
+            -d backup_demo \
+            -F c \
+            -f backups/backup.dump
+
+      - name: Verify backup file
+        run: |
+          test -s backups/backup.dump
+          echo "Backup file verification: PASS"
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-backup
+          path: backups/backup.dump
+          retention-days: 30
+
+  restore-verification:
+    needs: backup
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: restore_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d restore_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Download backup
+        uses: actions/download-artifact@v4
+        with:
+          name: database-backup
+          path: backups
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Restore database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          pg_restore \
+            -h localhost \
+            -U postgres \
+            -d restore_test \
+            backups/backup.dump
+
+      - name: Verify restored records
+        env:
+          PGPASSWORD: postgres
+        run: |
+          COUNT=$(psql \
+            -h localhost \
+            -U postgres \
+            -d restore_test \
+            -tAc "SELECT COUNT(*) FROM users;")
+
+          echo "Restored users: $COUNT"
+
+          if [ "$COUNT" -eq 3 ]; then
+            echo "RESTORE VERIFICATION: PASS"
+          else
+            echo "RESTORE VERIFICATION: FAIL"
+            exit 1
+          fi
