@@ -3,7 +3,7 @@ name: Automated Database Backup
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 1 * * *"
+    - cron: '0 1 * * *'
 
 jobs:
   backup:
@@ -19,10 +19,10 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d backup_demo"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --health-cmd="pg_isready -U postgres -d backup_demo"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
       - name: Checkout repository
@@ -32,113 +32,48 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl ca-certificates
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
+          echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          sudo apt-get install -y postgresql-client-18 
+          sudo apt-get install -y postgresql-client-18
 
       - name: Create test data
         env:
           PGPASSWORD: postgres
         run: |
-          psql \
-            -h localhost \
-            -U postgres \
-            -d backup_demo \
-            -c "DROP TABLE IF EXISTS users; CREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100), email VARCHAR(150));"
+          psql -h localhost -U postgres -d backup_demo -c "CREATE TABLE IF NOT EXISTS test_data (id SERIAL PRIMARY KEY, name TEXT);"
+          psql -h localhost -U postgres -d backup_demo -c "INSERT INTO test_data (name) VALUES ('Backup Test'), ('Restore Test'), ('GitHub Actions Test');"
 
-          psql \
-            -h localhost \
-            -U postgres \
-            -d backup_demo \
-            -c "INSERT INTO users (name, email) VALUES ('John Doe', 'john@example.com'), ('Mary James', 'mary@example.com'), ('David Okoro', 'david@example.com');"
-
-      - name: Create backup
+      - name: Create database backup
         env:
           PGPASSWORD: postgres
         run: |
           mkdir -p backups
-          pg_dump \
-            -h localhost \
-            -U postgres \
-            -d backup_demo \
-            -F c \
-            -f backups/backup.dump
+          pg_dump -h localhost -U postgres -d backup_demo -F c -f backups/backup_demo.dump
 
       - name: Verify backup file
         run: |
-          test -s backups/backup.dump
-          echo "Backup file verification: PASS"
+          ls -lh backups/backup_demo.dump
+          test -s backups/backup_demo.dump
+
+      - name: Restore backup to test database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS restore_test;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE restore_test;"
+          pg_restore -h localhost -U postgres -U postgres -d restore_test --clean --if-exists backups/backup_demo.dump
+
+      - name: Verify restored database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          COUNT=$(psql -h localhost -U postgres -d restore_test -tAc "SELECT COUNT(*) FROM test_data;")
+          echo "Restored record count: $COUNT"
+          test "$COUNT" -eq 3
 
       - name: Upload backup artifact
         uses: actions/upload-artifact@v4
         with:
           name: database-backup
-          path: backups/backup.dump
-          retention-days: 30
-
-  restore-verification:
-    needs: backup
-    runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: restore_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d restore_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - name: Download backup
-        uses: actions/download-artifact@v4
-        with:
-          name: database-backup
-          path: backups
-
-      - name: Install PostgreSQL client 18
-  run: |
-    sudo apt-get update
-    sudo apt-get install -y curl ca-certificates
-    sudo install -d /usr/share/postgresql-common/pgdg
-    sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
-    sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-    sudo apt-get update
-    sudo apt-get install -y postgresql-client-18
-
-      - name: Restore database
-        env:
-          PGPASSWORD: postgres
-        run: |
-          pg_restore \
-            -h localhost \
-            -U postgres \
-            -d restore_test \
-            backups/backup.dump
-
-      - name: Verify restored records
-        env:
-          PGPASSWORD: postgres
-        run: |
-          COUNT=$(psql \
-            -h localhost \
-            -U postgres \
-            -d restore_test \
-            -tAc "SELECT COUNT(*) FROM users;")
-
-          echo "Restored users: $COUNT"
-
-          if [ "$COUNT" -eq 3 ]; then
-            echo "RESTORE VERIFICATION: PASS"
-          else
-            echo "RESTORE VERIFICATION: FAIL"
-            exit 1
-          fi
+          path: backups/backup_demo.dump
